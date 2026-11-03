@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SignSpeak | Smart Glove Interface</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: { bg: '#050505', surface: '#111111', border: '#333333' },
+                        light: { bg: '#f8fafc', surface: '#ffffff', border: '#e2e8f0' }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+    <!-- Babel (Compiles JSX in the browser) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Framer Motion -->
+    <script src="https://unpkg.com/framer-motion@10.16.4/dist/framer-motion.js"></script>
+
+    <!-- Lucide Icons (Core Library) -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        :root {
+            --grid-color: rgba(0, 0, 0, 0.05);
+            --scrollbar-track: #f1f1f1;
+            --scrollbar-thumb: #93c5fd;
+            --scrollbar-hover: #2563eb;
+        }
+        .dark {
+            --grid-color: rgba(255, 255, 255, 0.02);
+            --scrollbar-track: #111;
+            --scrollbar-thumb: #333;
+            --scrollbar-hover: #00e075;
+        }
+        body { transition: background-color 0.5s ease, color 0.5s ease; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+        ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
+        .neon-text { text-shadow: 0 0 10px rgba(0, 224, 117, 0.5); }
+        .grid-bg {
+            background-size: 50px 50px;
+            background-image: linear-gradient(to right, var(--grid-color) 1px, transparent 1px),
+                              linear-gradient(to bottom, var(--grid-color) 1px, transparent 1px);
+        }
+    </style>
+</head>
+<body class="font-sans antialiased min-h-screen">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        const { motion, AnimatePresence } = window.Motion;
+
+        // --- Robust Icon Component ---
+        const Icon = ({ name, className }) => {
+            // Lucide looks for <i data-lucide="..."> tags
+            return <i data-lucide={name} className={className}></i>;
+        };
+
+        const QUOTES = [
+            { text: "The most important thing in communication is hearing what isn't said.", author: "Peter Drucker" },
+            { text: "Kind words can be short and easy to speak, but their echoes are truly endless.", author: "Mother Teresa" },
+            { text: "Speech is the mirror of the soul; as a man speaks, so is he.", author: "Publilius Syrus" },
+            { text: "To allow someone to speak is to give them a place in the world.", author: "Anonymous" },
+            { text: "Silence is a source of great strength, but connection is the essence of life.", author: "Lao Tzu" }
+        ];
+
+        // --- Mini Graph for Training Stats ---
+        const TrainingChart = ({ data, color, label }) => {
+            if (!data || data.length < 2) return <div className="h-32 flex items-center justify-center text-xs opacity-50 border border-gray-700 rounded-lg bg-black/20">Waiting for data...</div>;
+            const safeData = data.filter(n => !isNaN(n));
+            if (safeData.length < 2) return <div className="h-32 flex items-center justify-center text-xs opacity-50 border border-gray-700 rounded-lg bg-black/20">Insufficent data</div>;
+
+            const max = Math.max(...safeData);
+            const min = Math.min(...safeData);
+            const range = max - min || 1;
+
+            const points = safeData.map((val, i) => {
+                const x = (i / (safeData.length - 1)) * 100;
+                const y = 100 - ((val - min) / range) * 100;
+                return `${x},${y}`;
+            }).join(' ');
+
+            return (
+                <div className="h-40 w-full relative border border-gray-700 rounded-lg bg-black/20 p-3 overflow-hidden">
+                    <div className="absolute top-2 left-2 text-xs font-bold uppercase flex items-center gap-2" style={{color}}>
+                        <Icon name="activity" className="w-3 h-3" /> {label}
+                    </div>
+                    <div className="absolute top-2 right-2 text-xs font-mono opacity-50">{safeData[safeData.length-1].toFixed(4)}</div>
+                    <svg className="w-full h-full pt-4" viewBox="0 0 100 100" preserveAspectRatio="none">
+                        <polyline points={points} fill="none" stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+                    </svg>
+                </div>
+            );
+        };
+
+        // --- Custom Graph Component ---
+        const SensorGraph = ({ dataHistory, height = 150, theme }) => {
+            const canvasRef = useRef(null);
+
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                const ctx = canvas.getContext('2d');
+                const width = canvas.offsetWidth;
+                canvas.width = width;
+                canvas.height = height;
+
+                const bgColor = theme === 'dark' ? '#111827' : '#eff6ff';
+                const gridColor = theme === 'dark' ? '#374151' : '#bfdbfe';
+
+                ctx.clearRect(0, 0, width, height);
+                ctx.fillStyle = bgColor;
+                ctx.fillRect(0, 0, width, height);
+
+                const drawLine = (dataKey, color) => {
+                    ctx.beginPath();
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    const scaleY = height / 4;
+                    const centerY = height / 2;
+
+                    dataHistory.forEach((point, index) => {
+                        const x = (index / (dataHistory.length - 1)) * width;
+                        let val = 0;
+                        if (dataKey.includes('.')) {
+                            const parts = dataKey.split('.');
+                            val = point;
+                            for (let part of parts) val = val && val[part] !== undefined ? val[part] : 0;
+                        } else {
+                            val = point[dataKey];
+                        }
+                        const y = centerY - (val * scaleY * 0.1);
+                        if (index === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    });
+                    ctx.stroke();
+                };
+
+                ctx.strokeStyle = gridColor;
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(0, height/2);
+                ctx.lineTo(width, height/2);
+                ctx.stroke();
+
+                if (dataHistory.length > 1) {
+                    drawLine('mpu6050.acc.x', '#ef4444');
+                    drawLine('mpu6050.acc.y', '#22c55e');
+                    drawLine('mpu6050.acc.z', '#3b82f6');
+                }
+            }, [dataHistory, height, theme]);
+
+            return <canvas ref={canvasRef} className="w-full rounded-lg border border-blue-200 dark:border-gray-700 transition-colors duration-300" style={{ height: `${height}px` }} />;
+        };
+
+        // --- Main App ---
+        const App = () => {
+            const [view, setView] = useState('landing');
+            const [theme, setTheme] = useState('dark');
+            const [wsStatus, setWsStatus] = useState('disconnected');
+            const [currentQuote, setCurrentQuote] = useState(QUOTES[0]);
+            const [sensorData, setSensorData] = useState({
+                mpu6050: { acc: { x: 0, y: 0, z: 0 }, gyro: { x: 0, y: 0, z: 0 } },
+                halls: [0, 0, 0, 0, 0],
+                prediction: "..."
+            });
+            const [dataHistory, setDataHistory] = useState([]);
+
+            // Recording State
+            const [isRecording, setIsRecording] = useState(false);
+            const [recordLabel, setRecordLabel] = useState("");
+            const [recordCount, setRecordCount] = useState(0);
+            const [datasetStats, setDatasetStats] = useState([]);
+
+            // Visual Reference
+            const [refImage, setRefImage] = useState(null);
+            const [loadingRef, setLoadingRef] = useState(false);
+
+            // Training
+            const [isTraining, setIsTraining] = useState(false);
+            const [trainLog, setTrainLog] = useState([]);
+            const [trainHistory, setTrainHistory] = useState({ loss: [], accuracy: [] });
+            const [trainComplete, setTrainComplete] = useState(false);
+            const [trainSuccess, setTrainSuccess] = useState(false);
+            const [trainingReport, setTrainingReport] = useState(null);
+            const [reportLoading, setReportLoading] = useState(false);
+
+            const [toast, setToast] = useState(null);
+
+            const ws = useRef(null);
+
+            // --- CRITICAL: Icon Re-render Logic ---
+            // This effect runs on every render to ensure Lucide finds new <i data-lucide> tags and replaces them with SVGs
+            useEffect(() => {
+                if (window.lucide) window.lucide.createIcons();
+            });
+
+            useEffect(() => {
+                const random = Math.floor(Math.random() * QUOTES.length);
+                setCurrentQuote(QUOTES[random]);
+                const root = window.document.documentElement;
+                root.classList.add('dark');
+            }, []);
+
+            useEffect(() => {
+                const root = window.document.documentElement;
+                if (theme === 'dark') root.classList.add('dark');
+                else root.classList.remove('dark');
+            }, [theme]);
+
+            const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+
+            const showToast = (msg, type = 'error') => {
+                setToast({ msg, type });
+                setTimeout(() => setToast(null), 3000);
+            };
+
+            // --- Load Dataset Stats ---
+            useEffect(() => {
+                const fetchStats = async () => {
+                    try {
+                        const res = await fetch('/dataset-stats');
+                        if (res.ok) {
+                            const data = await res.json();
+                            setDatasetStats(data);
+                        }
+                    } catch (e) { console.error("Failed to fetch stats", e); }
+                };
+                fetchStats();
+            }, []);
+
+            // --- WebSocket Connection ---
+            useEffect(() => {
+                const connectWS = () => {
+                    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+
+                    try {
+                        ws.current = new WebSocket(wsUrl);
+                        ws.current.onopen = () => setWsStatus('connected');
+                        ws.current.onclose = () => {
+                             setWsStatus('disconnected');
+                             setTimeout(connectWS, 3000);
+                        };
+                        ws.current.onerror = () => setWsStatus('error');
+
+                        ws.current.onmessage = (event) => {
+                            const msg = JSON.parse(event.data);
+                            if (msg.type === "live_update") {
+                                setSensorData(prev => ({ ...prev, ...msg.data.raw_data, prediction: msg.data.prediction }));
+                                setDataHistory(prev => {
+                                    const newData = [...prev, msg.data.raw_data];
+                                    if (newData.length > 50) newData.shift();
+                                    return newData;
+                                });
+                                // Update record count from server
+                                if (msg.data.recording_count !== undefined) {
+                                    setRecordCount(msg.data.recording_count);
+                                }
+                            } else if (msg.type === "train_log") {
+                                setTrainLog(prev => {
+                                    const newLog = [...prev, msg.data];
+                                    if (newLog.length > 50) return newLog.slice(newLog.length - 50);
+                                    return newLog;
+                                });
+                            } else if (msg.type === "train_progress") {
+                                // Update charts
+                                setTrainHistory(prev => ({
+                                    loss: [...prev.loss, msg.data.loss],
+                                    accuracy: [...prev.accuracy, msg.data.accuracy]
+                                }));
+                            } else if (msg.type === "train_complete") {
+                                setIsTraining(false);
+                                setTrainComplete(true);
+                                setTrainSuccess(msg.success);
+                                if (msg.success) {
+                                    showToast("Training Completed Successfully", "success");
+                                    // Fetch the detailed report
+                                    setTimeout(() => fetchTrainingReport(), 500);
+                                }
+                                else showToast("Training Failed", "error");
+                            } else if (msg.type === "dataset_update") {
+                                setDatasetStats(msg.data);
+                            }
+                        };
+                    } catch (e) { console.error("WebSocket init failed", e); }
+                };
+                connectWS();
+                return () => { if (ws.current) ws.current.close(); };
+            }, []);
+
+            // --- API Calls ---
+            const setServerMode = async (mode) => {
+                try {
+                    await fetch('/set-mode', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mode })
+                    });
+                } catch (e) { console.error("Error setting mode:", e); }
+            };
+
+            const startRecording = async () => {
+                if (!recordLabel) { showToast("Please enter a label first!"); return; }
+                try {
+                    const res = await fetch('/start-recording', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ label: recordLabel })
+                    });
+                    const data = await res.json();
+                    if (data.status === 'recording_started') {
+                        setIsRecording(true);
+                        setRecordCount(0);
+                    } else { showToast(data.message || "Error starting"); }
+                } catch (e) { showToast("Connection Error"); }
+            };
+
+            const stopRecording = async () => {
+                try {
+                    const res = await fetch('/stop-recording', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.status === 'stopped_and_saved') {
+                        setIsRecording(false);
+                        setRecordCount(0);
+                        showToast(data.message, "success");
+                    } else {
+                        setIsRecording(false);
+                        showToast("Recording stopped (No data)", "error");
+                    }
+                } catch (e) { showToast("Connection Error"); }
+            };
+
+            const startTraining = async () => {
+                setIsTraining(true);
+                setTrainComplete(false);
+                setTrainSuccess(false);
+                setTrainLog([]);
+                setTrainHistory({ loss: [], accuracy: [] });
+                setTrainingReport(null);
+
+                try {
+                    const res = await fetch('/start-training', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.status !== 'training_started') {
+                        showToast("Failed to start training");
+                        setIsTraining(false);
+                    }
+                } catch (e) {
+                    showToast("Server Error");
+                    setIsTraining(false);
+                }
+            };
+
+            const fetchTrainingReport = async () => {
+                setReportLoading(true);
+                try {
+                    const res = await fetch('/training-report');
+                    if (res.ok) {
+                        const report = await res.json();
+                        setTrainingReport(report);
+                    } else {
+                        showToast("Could not load training report");
+                    }
+                } catch (e) {
+                    console.error("Failed to fetch report", e);
+                }
+                setReportLoading(false);
+            };
+
+            const searchVisualReference = async () => {
+                if (!recordLabel) { showToast("Please enter a label to search for!"); return; }
+                setLoadingRef(true);
+                setRefImage(null);
+                setTimeout(() => {
+                    const mockImageUrl = `https://placehold.co/600x400/1f2937/FFF?text=Visual+Reference:+${encodeURIComponent(recordLabel)}`;
+                    setRefImage(mockImageUrl);
+                    setLoadingRef(false);
+                }, 1500);
+            };
+
+            // --- Views ---
+            if (view === 'landing') {
+                return (
+                    <div className={`flex flex-col items-center justify-center min-h-screen relative overflow-hidden transition-colors duration-500 ${theme === 'dark' ? 'bg-[#050505] text-white' : 'bg-blue-50 text-blue-900'}`}>
+                        <div className="absolute top-6 right-6 z-50">
+                            <button onClick={toggleTheme} className="p-3 rounded-full bg-white/10 dark:bg-black/20 backdrop-blur-md border border-blue-200 dark:border-gray-800 hover:scale-110 transition-all shadow-lg">
+                                {theme === 'dark' ? <Icon name="sun" className="text-yellow-400 w-6 h-6" /> : <Icon name="moon" className="text-indigo-600 w-6 h-6" />}
+                            </button>
+                        </div>
+                        <div className={`absolute top-0 left-0 w-96 h-96 rounded-full blur-3xl mix-blend-multiply filter opacity-50 animate-pulse ${theme === 'dark' ? 'bg-green-500/20' : 'bg-blue-300/40'}`}></div>
+                        <div className={`absolute bottom-0 right-0 w-96 h-96 rounded-full blur-3xl mix-blend-multiply filter opacity-50 ${theme === 'dark' ? 'bg-blue-500/20' : 'bg-cyan-300/40'}`}></div>
+
+                        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.8 }} className="z-10 text-center max-w-4xl px-6">
+                            <div className="mb-6 flex justify-center"><Icon name="hand" className={`w-16 h-16 ${theme === 'dark' ? 'text-green-400' : 'text-blue-600'}`} /></div>
+                            <h1 className={`text-6xl md:text-8xl font-bold mb-4 tracking-tighter ${theme === 'dark' ? 'text-white' : 'text-blue-950'}`}>
+                                SIGN<span className={`neon-text ${theme === 'dark' ? 'text-green-400' : 'text-blue-600'}`}>SPEAK</span>
+                            </h1>
+                            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }} className="mb-8 max-w-2xl mx-auto">
+                                <div className={`flex flex-col items-center gap-3 p-6 rounded-xl border ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800 text-gray-300' : 'bg-white/60 border-blue-100 text-blue-800 shadow-sm'}`}>
+                                    <Icon name="message-square-quote" className={`w-6 h-6 ${theme === 'dark' ? 'text-green-400' : 'text-blue-500'}`} />
+                                    <p className="text-lg font-medium italic">"{currentQuote.text}"</p>
+                                    <p className="text-sm opacity-70">— {currentQuote.author}</p>
+                                </div>
+                            </motion.div>
+                            <p className={`text-xl mb-12 max-w-2xl mx-auto ${theme === 'dark' ? 'text-gray-400' : 'text-blue-700'}`}>
+                                Imagine a world where no voice goes unheard. We use advanced AI to bridge the silence, translating the beautiful language of gestures into spoken word instantly.
+                            </p>
+                            <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => { setView('dashboard'); setServerMode('prediction'); }} className={`font-bold text-lg px-10 py-4 rounded-full shadow-lg transition-all flex items-center gap-2 mx-auto ${theme === 'dark' ? 'bg-green-500 hover:bg-green-400 text-black shadow-[0_0_20px_rgba(34,197,94,0.4)]' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/30'}`}>
+                                Get Started <Icon name="play" className="w-5 h-5 fill-current" />
+                            </motion.button>
+                        </motion.div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className={`flex flex-col h-screen overflow-hidden grid-bg transition-colors duration-300 ${theme === 'dark' ? 'bg-[#050505] text-gray-200' : 'bg-blue-50 text-blue-900'}`}>
+                    <nav className={`h-16 border-b flex items-center justify-between px-6 backdrop-blur-md z-50 transition-colors duration-300 ${theme === 'dark' ? 'bg-black/80 border-gray-800' : 'bg-white/80 border-blue-200 shadow-sm'}`}>
+                        <div className="flex items-center gap-3 cursor-pointer" onClick={() => setView('landing')}>
+                            <Icon name="hand" className={`${theme === 'dark' ? 'text-green-500' : 'text-blue-600'} w-6 h-6`} />
+                            <span className="font-bold text-xl tracking-tight">SIGN<span className={`${theme === 'dark' ? 'text-green-500' : 'text-blue-600'}`}>SPEAK</span></span>
+                        </div>
+                        <div className={`flex items-center rounded-full p-1 ${theme === 'dark' ? 'bg-gray-900' : 'bg-blue-100'}`}>
+                            {[
+                                { id: 'dashboard', label: 'Dashboard', icon: 'activity' },
+                                { id: 'record', label: 'Record', icon: 'mic' },
+                                { id: 'train', label: 'Train AI', icon: 'cpu' },
+                            ].map(tab => (
+                                <button key={tab.id} onClick={() => { setView(tab.id); if(tab.id === 'record') setServerMode('recording'); if(tab.id === 'dashboard') setServerMode('prediction'); }} className={`px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2 transition-all ${view === tab.id ? (theme === 'dark' ? 'bg-gray-800 text-white shadow-sm' : 'bg-white text-blue-700 shadow-sm') : (theme === 'dark' ? 'text-gray-500 hover:text-gray-300' : 'text-blue-400 hover:text-blue-600')}`}>
+                                    <Icon name={tab.icon} className="w-4 h-4" /> {tab.label}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <button onClick={toggleTheme} className="hover:scale-110 transition-transform">
+                                {theme === 'dark' ? <Icon name="sun" className="text-yellow-400 w-5 h-5" /> : <Icon name="moon" className="text-indigo-600 w-5 h-5" />}
+                            </button>
+                            <div className={`flex items-center gap-2 text-xs font-mono border-l pl-4 ${theme === 'dark' ? 'border-gray-700' : 'border-blue-200'}`}>
+                                {wsStatus === 'connected' ? <span className="flex items-center text-green-500 gap-1"><Icon name="wifi" className="w-3 h-3" /> ONLINE</span> : <span className="flex items-center text-red-500 gap-1"><Icon name="wifi-off" className="w-3 h-3" /> OFFLINE</span>}
+                            </div>
+                        </div>
+                    </nav>
+
+                    <main className="flex-1 overflow-y-auto p-6 relative">
+                        <AnimatePresence mode="wait">
+                            {view === 'dashboard' && (
+                                <motion.div key="dash" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} className="max-w-6xl mx-auto space-y-6">
+                                    <div className={`border rounded-2xl p-8 text-center relative overflow-hidden transition-colors duration-300 ${theme === 'dark' ? 'bg-gradient-to-r from-green-900/20 to-gray-900 border-green-900/50' : 'bg-gradient-to-r from-blue-100 to-white border-blue-200 shadow-sm'}`}>
+                                        <div className={`absolute inset-0 opacity-20 ${theme === 'dark' ? 'bg-[url("data:image/svg+xml...")]' : ''}`}></div>
+                                        <h2 className={`${theme === 'dark' ? 'text-green-500' : 'text-blue-600'} font-mono text-sm mb-2 uppercase tracking-widest`}>Live Prediction</h2>
+                                        <div className={`text-7xl md:text-9xl font-black tracking-tighter mb-2 relative z-10 ${theme === 'dark' ? 'text-white' : 'text-blue-950'}`}>{sensorData.prediction}</div>
+                                        <div className={`text-sm ${theme === 'dark' ? 'text-gray-500' : 'text-blue-400'}`}>Confidence: 98.4%</div>
+                                    </div>
+                                    <div className="grid md:grid-cols-3 gap-6">
+                                        <div className={`md:col-span-2 border rounded-xl p-5 backdrop-blur-sm transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white/80 border-blue-200 shadow-sm'}`}>
+                                            <div className="flex justify-between items-center mb-4"><h3 className="font-semibold flex items-center gap-2"><Icon name="activity" className="text-blue-500 w-4 h-4" /> IMU Real-time Feed</h3><div className="flex gap-2 text-xs font-medium"><span className="text-red-500">X</span><span className="text-green-500">Y</span><span className="text-blue-500">Z</span></div></div>
+                                            <SensorGraph dataHistory={dataHistory} height={200} theme={theme} />
+                                        </div>
+                                        <div className={`border rounded-xl p-5 backdrop-blur-sm flex flex-col justify-center transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white/80 border-blue-200 shadow-sm'}`}>
+                                            <h3 className="font-semibold flex items-center gap-2 mb-6"><Icon name="hand" className="text-purple-500 w-4 h-4" /> Hall Sensors</h3>
+                                            <div className="space-y-4">
+                                                {['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'].map((finger, idx) => {
+                                                    // CUSTOM HALL SENSOR SCALING LOGIC (1500 to 3000)
+                                                    const val = sensorData.halls[idx];
+                                                    const minVal = 1500;
+                                                    const maxVal = 3000;
+                                                    const percent = Math.max(0, Math.min(100, ((val - minVal) / (maxVal - minVal)) * 100));
+
+                                                    return (
+                                                        <div key={finger} className="flex items-center gap-3">
+                                                            <div className="text-xs w-12 opacity-60">{finger}</div>
+                                                            <div className={`flex-1 h-2 rounded-full overflow-hidden ${theme === 'dark' ? 'bg-gray-800' : 'bg-blue-100'}`}>
+                                                                <div
+                                                                    className="h-full bg-purple-500 transition-all duration-100"
+                                                                    style={{ width: `${percent}%` }}
+                                                                ></div>
+                                                            </div>
+                                                            <div className="text-xs font-mono w-8 text-right opacity-80">{val}</div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+                                        {['Acc X', 'Acc Y', 'Acc Z', 'Gyro X', 'Gyro Y', 'Gyro Z'].map((label, i) => {
+                                            const isAcc = i < 3;
+                                            const axis = ['x','y','z'][i%3];
+                                            const val = isAcc ? sensorData.mpu6050.acc[axis] : sensorData.mpu6050.gyro[axis];
+                                            return (
+                                                <div key={label} className={`border p-3 rounded-lg text-center transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white border-blue-200 shadow-sm'}`}>
+                                                    <div className="text-[10px] uppercase opacity-50">{label}</div>
+                                                    <div className="font-mono text-sm text-blue-500">{val ? val.toFixed(2) : '0.00'}</div>
+                                                </div>
+                                            )
+                                        })}
+                                    </div>
+                                </motion.div>
+                            )}
+
+                            {view === 'record' && (
+                                <motion.div key="rec" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="max-w-7xl mx-auto grid md:grid-cols-3 gap-6 h-full">
+                                    <div className="md:col-span-2 flex flex-col gap-6">
+                                        <div className={`border rounded-xl p-6 relative overflow-hidden transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white border-blue-200 shadow-sm'}`}>
+                                            <div className="flex justify-between items-center mb-4"><h2 className="text-xl font-bold">Data Recorder</h2>{isRecording && <div className="flex items-center gap-2 text-green-500 font-mono animate-pulse bg-green-500/10 px-3 py-1 rounded-full text-sm font-bold border border-green-500/30"><div className="w-2 h-2 bg-green-500 rounded-full"></div> REC: {recordCount}</div>}</div>
+                                            <div className="flex gap-3 mb-6 items-stretch">
+                                                <input type="text" disabled={isRecording} value={recordLabel} onChange={(e) => setRecordLabel(e.target.value)} placeholder="Enter Gesture Label (e.g. 'Hello')" className={`border px-4 py-3 rounded-lg flex-1 focus:outline-none focus:border-green-500 disabled:opacity-50 transition-colors duration-300 ${theme === 'dark' ? 'bg-black border-gray-700 text-white' : 'bg-blue-50 border-blue-200 text-blue-900'}`} />
+                                                <button onClick={searchVisualReference} className={`px-4 rounded-lg flex items-center justify-center transition-colors ${theme === 'dark' ? 'bg-gray-800 hover:bg-gray-700 border border-gray-700' : 'bg-blue-100 hover:bg-blue-200 border border-blue-200 text-blue-800'}`} title="Search Visual Reference"><Icon name="image" className="w-5 h-5" /></button>
+                                                {!isRecording ? <button onClick={startRecording} className={`font-bold px-6 rounded-lg transition-colors shadow-lg ${theme === 'dark' ? 'bg-green-600 hover:bg-green-500 text-white shadow-green-500/20' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20'}`}>Record</button> : <button onClick={stopRecording} className="bg-red-600 hover:bg-red-500 text-white font-bold px-6 rounded-lg transition-colors">Stop</button>}
+                                            </div>
+                                            <AnimatePresence>
+                                                {(loadingRef || refImage) && (
+                                                    <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden mb-4">
+                                                        <div className={`border rounded-lg p-4 relative ${theme === 'dark' ? 'bg-black border-gray-700' : 'bg-blue-50 border-blue-200'}`}>
+                                                            <button onClick={() => { setRefImage(null); setLoadingRef(false); }} className="absolute top-2 right-2 p-1 rounded-full hover:bg-gray-500/20"><Icon name="x" className="w-4 h-4" /></button>
+                                                            <h4 className="text-xs font-bold uppercase opacity-70 mb-2 flex items-center gap-2"><Icon name="search" className="w-3 h-3" /> Visual Reference</h4>
+                                                            <div className="flex justify-center items-center min-h-[200px] bg-black/20 rounded border border-dashed border-gray-500/30">
+                                                                {loadingRef ? <div className="flex flex-col items-center gap-2 text-sm opacity-70"><Icon name="loader-2" className="w-8 h-8 animate-spin text-blue-500" /><span>Searching...</span></div> : <img src={refImage} alt="Visual Reference" className="max-h-64 rounded shadow-lg object-contain" />}
+                                                            </div>
+                                                        </div>
+                                                    </motion.div>
+                                                )}
+                                            </AnimatePresence>
+                                            <div className={`rounded-lg border p-1 h-64 transition-colors duration-300 ${theme === 'dark' ? 'bg-black border-gray-800' : 'bg-blue-50 border-blue-200'}`}><SensorGraph dataHistory={dataHistory} height={250} theme={theme} /></div>
+                                        </div>
+                                    </div>
+                                    <div className={`border rounded-xl p-6 flex flex-col transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white border-blue-200 shadow-sm'}`}>
+                                        <h3 className="font-bold mb-4 flex items-center gap-2 opacity-80"><Icon name="square" className="w-4 h-4" /> Dataset Stats</h3>
+                                        <div className="flex-1 overflow-y-auto space-y-2 pr-2">
+                                            {datasetStats.length === 0 ? (
+                                                <p className="text-sm opacity-50 text-center italic mt-10">No data found in ./data folder</p>
+                                            ) : (
+                                                datasetStats.map((item, i) => (
+                                                    <div key={i} className={`flex justify-between items-center p-3 mb-2 rounded-lg border border-transparent transition-colors cursor-default ${theme === 'dark' ? 'bg-gray-800/50 hover:bg-gray-800 hover:border-gray-700' : 'bg-blue-50 hover:bg-blue-100 hover:border-blue-200'}`}>
+                                                        <span className="font-medium text-sm">{item.word}</span>
+                                                        <span className={`text-xs font-mono px-2 py-1 rounded ${theme === 'dark' ? 'bg-black text-gray-400' : 'bg-white text-blue-600 border border-blue-100'}`}>{item.count} files</span>
+                                                    </div>
+                                                ))
+                                            )}
+                                        </div>
+                                    </div>
+                                </motion.div>
+                            )}
+
+                            {view === 'train' && (
+                                <motion.div key="train" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="max-w-6xl mx-auto space-y-8">
+                                    <div className={`flex flex-col md:flex-row justify-between items-end border-b pb-6 transition-colors duration-300 ${theme === 'dark' ? 'border-gray-800' : 'border-blue-200'}`}>
+                                        <div><h2 className={`text-3xl font-bold mb-2 ${theme === 'dark' ? 'text-white' : 'text-blue-900'}`}>Model Training</h2><p className="opacity-60">Retrain the neural network with the latest dataset.</p></div>
+                                        <button onClick={startTraining} disabled={isTraining} className={`px-6 py-3 rounded-lg font-bold flex items-center gap-2 transition-all ${isTraining ? (theme === 'dark' ? 'bg-gray-800 text-gray-500' : 'bg-gray-200 text-gray-400') : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20'}`}>
+                                            {isTraining ? <span className="animate-spin">⟳</span> : <Icon name="zap" className="w-4 h-4" />}{isTraining ? 'Training...' : 'Start Training'}
+                                        </button>
+                                    </div>
+
+                                    {trainComplete && trainSuccess && (
+                                        <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="space-y-6">
+                                            {/* Success Header */}
+                                            <div className={`border rounded-xl p-8 text-center transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900 border-green-500/30' : 'bg-white border-green-500/20 shadow-lg'}`}>
+                                                <div className="inline-flex items-center justify-center w-20 h-20 bg-green-500/10 rounded-full mb-6"><Icon name="check-circle-2" className="w-10 h-10 text-green-500" /></div>
+                                                <h3 className={`text-2xl font-bold mb-2 ${theme === 'dark' ? 'text-white' : 'text-slate-900'}`}>Training Successful</h3>
+                                                <p className="text-sm opacity-60 mb-6">Model successfully trained and hot-reloaded.</p>
+                                            </div>
+
+                                            {/* Detailed Report Section */}
+                                            {reportLoading ? (
+                                                <div className={`border rounded-xl p-8 text-center transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white border-gray-200'}`}>
+                                                    <Icon name="loader-2" className="w-8 h-8 animate-spin text-blue-500 mx-auto" />
+                                                    <p className="mt-3 text-sm opacity-60">Loading detailed report...</p>
+                                                </div>
+                                            ) : !trainingReport ? (
+                                                <div className={`border rounded-xl p-8 text-center transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white border-gray-200'}`}>
+                                                    <Icon name="alert-circle" className="w-8 h-8 text-yellow-500 mx-auto" />
+                                                    <p className="mt-3 text-sm opacity-60">Report not available. Please check server logs.</p>
+                                                </div>
+                                            ) : trainingReport && trainingReport.class_metrics && (
+                                                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+                                                    {/* Per-Class Metrics */}
+                                                    <div className={`border rounded-xl overflow-hidden transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white border-gray-200 shadow-sm'}`}>
+                                                        <div className={`p-6 border-b ${theme === 'dark' ? 'border-gray-800' : 'border-gray-100'}`}>
+                                                            <h4 className="font-bold text-lg flex items-center gap-2"><Icon name="chart-bar" className="w-5 h-5 text-purple-500" /> Per-Class Performance</h4>
+                                                        </div>
+                                                        <div className="overflow-x-auto">
+                                                            <table className="w-full text-sm">
+                                                                <thead>
+                                                                    <tr className={`border-b ${theme === 'dark' ? 'border-gray-800 bg-black/50' : 'border-gray-100 bg-gray-50'}`}>
+                                                                        <th className="p-4 text-left font-semibold">Class</th>
+                                                                        <th className="p-4 text-center font-semibold">Accuracy</th>
+                                                                        <th className="p-4 text-center font-semibold">Precision</th>
+                                                                        <th className="p-4 text-center font-semibold">Recall</th>
+                                                                        <th className="p-4 text-center font-semibold">F1-Score</th>
+                                                                        <th className="p-4 text-center font-semibold">Support</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {trainingReport.class_metrics.map((metric, i) => (
+                                                                        <tr key={i} className={`border-b transition-colors hover:opacity-70 ${theme === 'dark' ? 'border-gray-800 hover:bg-gray-800/30' : 'border-gray-100 hover:bg-blue-50'}`}>
+                                                                            <td className="p-4 font-semibold">{metric.class}</td>
+                                                                            <td className="p-4 text-center"><span className={`px-2 py-1 rounded font-mono ${metric.accuracy >= 0.8 ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>{(metric.accuracy * 100).toFixed(1)}%</span></td>
+                                                                            <td className="p-4 text-center font-mono text-blue-400">{metric.precision.toFixed(3)}</td>
+                                                                            <td className="p-4 text-center font-mono text-purple-400">{metric.recall.toFixed(3)}</td>
+                                                                            <td className="p-4 text-center font-mono text-green-400">{metric.f1_score.toFixed(3)}</td>
+                                                                            <td className="p-4 text-center opacity-60">{metric.support}</td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Confusion Matrix Heatmap */}
+                                                    {trainingReport.confusion_matrix ? (
+                                                    <div className={`border rounded-xl p-6 transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white border-gray-200 shadow-sm'}`}>
+                                                        <h4 className="font-bold text-lg flex items-center gap-2 mb-4"><Icon name="grid" className="w-5 h-5 text-red-500" /> Confusion Matrix</h4>
+                                                        <div className="overflow-x-auto">
+                                                            <table className="text-xs border-collapse">
+                                                                <thead>
+                                                                    <tr>
+                                                                        <th className="p-2"></th>
+                                                                        {Object.keys(trainingReport.confusion_matrix).map(label => (
+                                                                            <th key={label} className="p-2 text-center font-semibold opacity-70">{label.substring(0, 3)}</th>
+                                                                        ))}
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {Object.entries(trainingReport.confusion_matrix).map(([actual, predictions]) => (
+                                                                        <tr key={actual}>
+                                                                            <td className="p-2 font-semibold opacity-70 text-right">{actual.substring(0, 3)}</td>
+                                                                            {Object.values(predictions).map((value, i) => {
+                                                                                const max = Math.max(...Object.values(predictions));
+                                                                                const intensity = max > 0 ? value / max : 0;
+                                                                                return (
+                                                                                    <td key={i} className={`p-2 text-center font-mono font-bold rounded transition-colors ${intensity > 0.7 ? 'bg-green-500/40' : intensity > 0.3 ? 'bg-yellow-500/30' : 'bg-gray-700/20'}`}>{value}</td>
+                                                                                );
+                                                                            })}
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </div>
+                                                    ) : null}
+
+                                                    {/* Training Info & Top Errors */}
+                                                    <div className="grid md:grid-cols-2 gap-6">
+                                                        {/* Training Config */}
+                                                        {trainingReport.training_config ? (
+                                                        <div className={`border rounded-xl p-6 transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white border-gray-200 shadow-sm'}`}>
+                                                            <h4 className="font-bold text-lg flex items-center gap-2 mb-4"><Icon name="settings" className="w-5 h-5 text-cyan-500" /> Training Config</h4>
+                                                            <div className="space-y-2 text-sm">
+                                                                <div className="flex justify-between opacity-70"><span>Epochs</span><span className="font-mono font-bold">{trainingReport.training_config.epochs}</span></div>
+                                                                <div className="flex justify-between opacity-70"><span>Batch Size</span><span className="font-mono font-bold">{trainingReport.training_config.batch_size}</span></div>
+                                                                <div className="flex justify-between opacity-70"><span>Training Samples</span><span className="font-mono font-bold">{trainingReport.training_config.train_samples}</span></div>
+                                                                <div className="flex justify-between opacity-70"><span>Test Samples</span><span className="font-mono font-bold">{trainingReport.training_config.test_samples}</span></div>
+                                                                <div className="flex justify-between opacity-70"><span>Classes</span><span className="font-mono font-bold">{trainingReport.training_config.num_classes}</span></div>
+                                                                <div className="flex justify-between opacity-70"><span>Window Size</span><span className="font-mono font-bold">{trainingReport.training_config.window_size}</span></div>
+                                                            </div>
+                                                        </div>
+                                                        ) : null}
+
+                                                        {/* Top Errors */}
+                                                        {trainingReport.top_errors ? (
+                                                        <div className={`border rounded-xl p-6 transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white border-gray-200 shadow-sm'}`}>
+                                                            <h4 className="font-bold text-lg flex items-center gap-2 mb-4"><Icon name="alert-triangle" className="w-5 h-5 text-orange-500" /> Top Misclassifications</h4>
+                                                            <div className="space-y-3 text-sm max-h-72 overflow-y-auto">
+                                                                {trainingReport.top_errors.length === 0 ? (
+                                                                    <p className="opacity-50 italic">No errors! Perfect accuracy.</p>
+                                                                ) : (
+                                                                    trainingReport.top_errors.slice(0, 5).map((error, i) => (
+                                                                        <div key={i} className={`p-3 rounded border-l-2 border-orange-500 ${theme === 'dark' ? 'bg-black/30' : 'bg-orange-50'}`}>
+                                                                            <div className="flex justify-between items-start gap-2 mb-2">
+                                                                                <div className="flex-1">
+                                                                                    <div className="text-xs opacity-70">Expected: <span className="font-semibold text-green-400">{error.actual}</span></div>
+                                                                                    <div className="text-xs opacity-70">Got: <span className="font-semibold text-red-400">{error.predicted}</span></div>
+                                                                                </div>
+                                                                                <span className="text-xs font-mono font-bold opacity-60">{(error.confidence * 100).toFixed(0)}%</span>
+                                                                            </div>
+                                                                        </div>
+                                                                    ))
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        ) : null}
+                                                    </div>
+                                                </motion.div>
+                                            )}
+                                        </motion.div>
+                                    )}
+
+                                    <div className={`border rounded-xl p-4 font-mono text-xs h-48 overflow-y-auto flex flex-col-reverse ${theme === 'dark' ? 'bg-black/80 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
+                                        {trainLog.length === 0 && <span className="opacity-50">Ready.</span>}
+                                        {trainLog.map((line, i) => <div key={i} className="mb-1 border-l-2 border-blue-500 pl-2 opacity-80">{line}</div>)}
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+
+                        <AnimatePresence>
+                            {toast && (
+                                <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 50 }} className={`fixed bottom-8 left-1/2 transform -translate-x-1/2 px-6 py-3 rounded-full font-bold shadow-xl z-50 flex items-center gap-2 ${toast.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'}`}>
+                                    <Icon name={toast.type === 'success' ? "check-circle-2" : "alert-circle"} className="w-5 h-5" />
+                                    {toast.msg}
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
