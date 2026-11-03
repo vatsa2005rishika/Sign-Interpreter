@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Glove Live Telemetry</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2em; background: #121212; color: #eee; }
+        h1 { color: #00e075; }
+        .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .data-box { background: #222; padding: 15px; border-radius: 8px; }
+        .data-box h2 { margin-top: 0; border-bottom: 1px solid #444; padding-bottom: 10px; }
+        #status { font-weight: bold; }
+        #rec-status { font-weight: bold; font-size: 1.1em; }
+        #label-input { font-size: 1.1em; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #333; color: #eee; }
+        .btn { font-size: 1.1em; padding: 10px 15px; border-radius: 5px; border: none; cursor: pointer; margin: 5px; }
+        #btn-start { background: #00b060; color: white; }
+        #btn-stop { background: #d93030; color: white; }
+        #btn-stop:disabled { background: #555; }
+        pre { background: #333; padding: 10px; border-radius: 5px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>Glove Live Telemetry</h1>
+    <p>WebSocket Status: <span id="status">Connecting...</span></p>
+
+    <div class="data-box" style="margin-bottom: 20px;">
+        <h2>Recording Control</h2>
+        <p>Status: <span id="rec-status" style="color: #ff4d4d;">NOT RECORDING</span></p>
+        <div>
+            <label for="label-input" style="margin-right: 10px;">Label (e.g., "A", "hello"):</label>
+            <input type="text" id="label-input" placeholder="Enter sign name...">
+        </div>
+        <div style="margin-top: 15px;">
+            <button id="btn-start" class="btn">Start Recording</button>
+            <button id="btn-stop" class="btn" disabled>Stop Recording</button>
+        </div>
+        <p id="rec-message"></p>
+    </div>
+
+    <div class="data-grid">
+        <div class="data-box">
+            <h2>IMU (MPU6050)</h2>
+            <p><strong>Accel X:</strong> <span id="acc_x">0.0</span></p>
+            <p><strong>Accel Y:</strong> <span id="acc_y">0.0</span></p>
+            <p><strong>Accel Z:</strong> <span id="acc_z">0.0</span></p>
+            <hr>
+            <p><strong>Gyro X:</strong> <span id="gyro_x">0.0</span></p>
+            <p><strong>Gyro Y:</strong> <span id="gyro_y">0.0</span></p>
+            <p><strong>Gyro Z:</strong> <span id="gyro_z">0.0</span></p>
+        </div>
+        <div class="data-box">
+            <h2>Hall Sensors (Fingers)</h2>
+            <p><strong>Thumb:</strong> <span id="hall_1">0</span></p>
+            <p><strong>Index:</strong> <span id="hall_2">0</span></p>
+            <p><strong>Middle:</strong> <span id="hall_3">0</span></p>
+            <p><strong>Ring:</strong> <span id="hall_4">0</span></p>
+            <p><strong>Pinky:</strong> <span id="hall_5">0</span></p>
+        </div>
+    </div>
+
+    <div class="data-box">
+        <h2>Raw JSON Payload (Live)</h2>
+        <pre id="raw-json">Waiting for data...</pre>
+    </div>
+
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            // --- WebSocket Elements ---
+            const status = document.getElementById("status");
+            const rawJson = document.getElementById("raw-json");
+            
+            // Sensor value elements
+            const acc_x = document.getElementById("acc_x");
+            const acc_y = document.getElementById("acc_y");
+            const acc_z = document.getElementById("acc_z");
+            const gyro_x = document.getElementById("gyro_x");
+            const gyro_y = document.getElementById("gyro_y");
+            const gyro_z = document.getElementById("gyro_z");
+            const halls = [
+                document.getElementById("hall_1"),
+                document.getElementById("hall_2"),
+                document.getElementById("hall_3"),
+                document.getElementById("hall_4"),
+                document.getElementById("hall_5")
+            ];
+
+            // --- Recording Elements ---
+            const recStatus = document.getElementById("rec-status");
+            const labelInput = document.getElementById("label-input");
+            const btnStart = document.getElementById("btn-start");
+            const btnStop = document.getElementById("btn-stop");
+            const recMessage = document.getElementById("rec-message");
+
+            // --- WebSocket Setup ---
+            const ws = new WebSocket(`ws://${window.location.host}/ws`);
+
+            ws.onopen = (event) => {
+                status.textContent = "Connected";
+                status.style.color = "#00e075";
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                
+                rawJson.textContent = JSON.stringify(data, null, 2);
+
+                const imu = data.mpu6050;
+                acc_x.textContent = imu.acc.x.toFixed(4);
+                acc_y.textContent = imu.acc.y.toFixed(4);
+                acc_z.textContent = imu.acc.z.toFixed(4);
+                gyro_x.textContent = imu.gyro.x.toFixed(4);
+                gyro_y.textContent = imu.gyro.y.toFixed(4);
+                gyro_z.textContent = imu.gyro.z.toFixed(4);
+
+                for (let i = 0; i < 5; i++) {
+                    if (halls[i]) halls[i].textContent = data.halls[i];
+                }
+            };
+
+            ws.onclose = (event) => {
+                status.textContent = "Disconnected. Refresh to retry.";
+                status.style.color = "#ff4d4d";
+            };
+
+            ws.onerror = (error) => {
+                status.textContent = "Error. See console.";
+                status.style.color = "#ff4d4d";
+                console.error("WebSocket Error:", error);
+            };
+
+            // --- Recording Button Logic ---
+            btnStart.addEventListener("click", async () => {
+                const label = labelInput.value;
+                if (!label) {
+                    alert("Please enter a label first!");
+                    return;
+                }
+                recMessage.textContent = "Starting...";
+                
+                const response = await fetch("/start", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ label: label })
+                });
+                const result = await response.json();
+                
+                if (result.status === "recording_started") {
+                    recStatus.textContent = `RECORDING: [ ${label} ]`;
+                    recStatus.style.color = "#00e075";
+                    recMessage.textContent = "";
+                    btnStart.disabled = true;
+                    btnStop.disabled = false;
+                    labelInput.disabled = true;
+                } else {
+                    recMessage.textContent = `Error: ${result.message}`;
+                }
+            });
+
+            btnStop.addEventListener("click", async () => {
+                recMessage.textContent = "Stopping and saving...";
+                
+                const response = await fetch("/stop", { method: "POST" });
+                const result = await response.json();
+                
+                if (result.status === "stopped_and_saved") {
+                    recStatus.textContent = "NOT RECORDING";
+                    recStatus.style.color = "#ff4d4d";
+                    recMessage.textContent = `Success! Saved ${result.rows} rows to ${result.filepath}`;
+                    btnStart.disabled = false;
+                    btnStop.disabled = true;
+                    labelInput.disabled = false;
+                } else {
+                    recMessage.textContent = `Error: ${result.message}`;
+                }
+            });
+        });
+    </script>
+</body>
+</html>
