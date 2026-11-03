@@ -1,0 +1,5 @@
+,Pred: Hello,Pred: No,Pred: ThankYou,Pred: Yes
+Actual: Hello,6,2,9,4
+Actual: No,4,8,10,7
+Actual: ThankYou,5,3,4,4
+Actual: Yes,4,10,10,7

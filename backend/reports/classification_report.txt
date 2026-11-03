@@ -1,0 +1,10 @@
+              precision    recall  f1-score   support
+
+       Hello       0.32      0.29      0.30        21
+          No       0.35      0.28      0.31        29
+    ThankYou       0.12      0.25      0.16        16
+         Yes       0.32      0.23      0.26        31
+
+    accuracy                           0.26        97
+   macro avg       0.28      0.26      0.26        97
+weighted avg       0.29      0.26      0.27        97
