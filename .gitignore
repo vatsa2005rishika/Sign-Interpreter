@@ -2,6 +2,7 @@
 venv/
 __pycache__/
 *.py[cod]
+frame_model.joblib
 
 
 # Ignore local credentials/configuration.
