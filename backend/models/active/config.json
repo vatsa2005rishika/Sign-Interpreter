@@ -1,0 +1,29 @@
+{
+  "kind": "frame",
+  "model": "ExtraTrees",
+  "classes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "F",
+    "I",
+    "L",
+    "Neutral",
+    "W",
+    "Y"
+  ],
+  "features": [
+    "hall_0",
+    "hall_1",
+    "hall_2",
+    "hall_3",
+    "hall_4",
+    "acc_dir_x",
+    "acc_dir_y",
+    "acc_dir_z"
+  ],
+  "smooth_ms": 60.0,
+  "trained_at": "2026-11-04T21:46:22.470854",
+  "infer_ms": 8.64
+}

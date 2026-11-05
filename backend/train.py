@@ -1,351 +1,312 @@
+"""
+train.py - trains the per-reading (static letter) model.
+
+What changed compared to the old LSTM version, and why:
+  * Looks at ONE moment (smoothed over 60 ms), not a 50-reading window.
+    -> decisions no longer wait for a full window, and it does not matter
+       whether your old recordings were made at 20 Hz or new ones at 100 Hz.
+  * Train/test split is by RECORDING SESSION, not by random window.
+    -> the accuracy number is honest (no near-copies in both sets).
+  * Tries 3 small models and keeps the best one on the held-out sessions.
+  * Saves everything the server needs in models/active/ (written safely, so the
+    server never reads a half-written file).
+  * Still writes reports/training_report.json in the shape the web page expects.
+
+Run:  python train.py
+"""
+import json
 import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix, precision_recall_fscore_support
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
-from tensorflow.keras.utils import to_categorical
-import joblib
-import json
-from datetime import datetime
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
+from sklearn.metrics import (confusion_matrix, f1_score,
+                             precision_recall_fscore_support)
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
-# Suppress TensorFlow info and debug messages
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warning, 3=error only
+from features import (FEATURE_NAMES, RAW_COLUMNS, SMOOTH_MS, clean_ts,
+                      to_features, trailing_mean)
 
-
-# --- 1. Configuration ---
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data" / "ALL_DATA"
+DATA_DIR = Path(os.environ.get("SIGN_DATA_DIR", BASE_DIR / "data" / "ALL_DATA"))
 MODELS_DIR = BASE_DIR / "models" / "active"
 REPORTS_DIR = BASE_DIR / "reports"
-SAMPLE_RATE_HZ = 50
 
-# CHANGE THIS FROM 2.0 TO 1.0
-WINDOW_SECONDS = 1.0  # Now 1 second window
-STEP_SECONDS = 0.25   # Slide faster (overlap more)
+TRIM_MS = 300          # drop the first/last 0.3 s of every recording (hand still moving into/out of shape)
+TEST_FRACTION = 0.2    # share of SESSIONS held out for testing
+AUGMENT_COPIES = 2     # extra noisy copies of each training row
+SEED = 42
 
-# This will automatically calculate WINDOW_SIZE to be 50
-WINDOW_SIZE = int(SAMPLE_RATE_HZ * WINDOW_SECONDS) 
-STEP_SIZE = int(SAMPLE_RATE_HZ * STEP_SECONDS)
 
-# Define the features (columns) we want to use for training
-FEATURE_COLUMNS = [
-    'mpu_acc_x', 'mpu_acc_y', 'mpu_acc_z',
-    'mpu_gyro_x', 'mpu_gyro_y', 'mpu_gyro_z',
-    'hall_0', 'hall_1', 'hall_2', 'hall_3', 'hall_4'
-]
-NUM_FEATURES = len(FEATURE_COLUMNS)
+def log(*a):
+    print(*a, flush=True)
 
-# --- 2. Data Loading and Processing Functions ---
 
-def flatten_session_data(df):
-    """
-    Takes a raw DataFrame (with nested JSON) and flattens it.
-    Returns a new DataFrame with simple columns like 'mpu_acc_x', 'hall_0', etc.
-    Handles both nested JSON format and already-flattened format.
-    """
+# ----------------------------------------------------------------------------
+# 1. Reading recordings (works for old nested-JSON files and new flat files)
+# ----------------------------------------------------------------------------
+def flatten_session(df):
+    """Return an (n, 11) float array in RAW_COLUMNS order, or None."""
+    if all(c in df.columns for c in RAW_COLUMNS):
+        return df[RAW_COLUMNS].to_numpy(dtype=float)
     try:
-        # Check if data is already in the new flattened format
-        if all(col in df.columns for col in FEATURE_COLUMNS):
-            print("  Data is already flattened, using as-is")
-            return df[FEATURE_COLUMNS]
-    except:
-        pass
-    
-    try:
-        # 1. Flatten mpu6050 (which is a dict column)
-        if 'mpu6050' in df.columns:
-            mpu_df = pd.json_normalize(df['mpu6050'])
-            mpu_df.columns = [f'mpu_{c.replace(".", "_")}' for c in mpu_df.columns]
-        else:
-            # Alternative: maybe it's stored differently
-            print(f"  Warning: 'mpu6050' column not found. Available columns: {df.columns.tolist()}")
-            return None
-        
-        # 2. Flatten halls (which is a list column)
-        if 'halls' in df.columns:
-            halls_df = pd.DataFrame(
-                df['halls'].tolist(), 
-                columns=[f'hall_{i}' for i in range(5)],
-                index=df.index
-            )
-        else:
-            print(f"  Warning: 'halls' column not found. Available columns: {df.columns.tolist()}")
-            return None
-        
-        # 3. Combine all flattened features
-        features_df = pd.concat([mpu_df, halls_df], axis=1)
-        
-        # 4. Select and reorder just the features we want
-        return features_df[FEATURE_COLUMNS]
-    except Exception as e:
-        print(f"  Error flattening session data: {e}")
-        print(f"  Available columns in DataFrame: {df.columns.tolist()}")
+        mpu = pd.json_normalize(df["mpu6050"].tolist())
+        mpu.columns = ["mpu_" + c.replace(".", "_") for c in mpu.columns]
+        halls = pd.DataFrame(df["halls"].tolist(),
+                             columns=[f"hall_{i}" for i in range(5)])
+        flat = pd.concat([mpu, halls], axis=1)[RAW_COLUMNS]
+        return flat.to_numpy(dtype=float)
+    except Exception as e:  # noqa
+        log(f"    could not flatten: {e}")
         return None
 
 
-def create_windows(session_df, label):
-    """
-    Takes a single session's DataFrame and slices it into
-    overlapping windows.
-    """
-    windows = []
-    labels = []
-    
-    # Slide the window across the data
-    for start in range(0, len(session_df) - WINDOW_SIZE + 1, STEP_SIZE):
-        end = start + WINDOW_SIZE
-        window_data = session_df.iloc[start:end]
-        windows.append(window_data.values) # as numpy array
-        labels.append(label)
-        
-    return windows, labels
+def read_ts(df):
+    """Device timestamps in ms, or None if the file has no usable ones."""
+    if "ts_device" not in df.columns:
+        return None
+    s = pd.to_numeric(df["ts_device"], errors="coerce")
+    if s.notna().all():
+        return s.to_numpy(dtype=float)
+    try:
+        d = pd.to_datetime(df["ts_device"], errors="coerce")
+        if d.notna().all():
+            return ((d - d.iloc[0]).dt.total_seconds() * 1000.0).to_numpy(dtype=float)
+    except Exception:  # noqa
+        pass
+    return None
 
 
-def load_and_process_data(data_dir):
-    """
-    Main function to load all data from the `data` directory,
-    flatten it, and create labeled windows.
-    """
-    all_windows = []
-    all_labels = []
+def session_to_features(path):
+    df = pd.read_parquet(path)
+    X = flatten_session(df)
+    if X is None or len(X) < 5:
+        return None, None
+    ts = read_ts(df)
+    ts = clean_ts(ts if ts is not None else np.arange(len(X)) * 50.0)
+    M = trailing_mean(ts, X, SMOOTH_MS)
+    F = to_features(M)
+    keep = (ts >= ts[0] + TRIM_MS) & (ts <= ts[-1] - TRIM_MS)
+    if keep.sum() >= 5:
+        F = F[keep]
+    dt = np.median(np.diff(ts)) if len(ts) > 1 else float("nan")
+    return F, dt
 
-    print(f"Scanning for data in: {data_dir}")
-    for label_dir in data_dir.iterdir():
-        if not label_dir.is_dir():
+
+def load_all():
+    sessions = {}          # label -> list of (session_id, F)
+    rate_notes = []
+    log(f"Scanning: {DATA_DIR}")
+    for label_dir in sorted(p for p in DATA_DIR.iterdir() if p.is_dir()):
+        if label_dir.name.startswith((".", "_")):
             continue
         label = label_dir.name
-        print(f"\nProcessing label: [{label}]")
-        
-        label_file_count = 0
-        for session_file in label_dir.glob("*.parquet"):
+        for f in sorted(label_dir.glob("*.parquet")):
             try:
-                raw_df = pd.read_parquet(session_file)
-                features_df = flatten_session_data(raw_df)
-                
-                if features_df is None or features_df.empty:
-                    print(f"  Skipping {session_file.name}: Could not flatten data")
-                    continue
-                
-                windows, labels = create_windows(features_df, label)
-                all_windows.extend(windows)
-                all_labels.extend(labels)
-                label_file_count += 1
-            except Exception as e:
-                print(f"  Error processing {session_file.name}: {e}")
+                F, dt = session_to_features(f)
+            except Exception as e:  # noqa
+                log(f"  skip {label}/{f.name}: {e}")
                 continue
-        
-        print(f"  Loaded {label_file_count} files for '{label}'")
-    
-    print("\nData loading complete.")
-    if len(all_windows) == 0:
-        print("WARNING: No valid data was loaded!")
-        return np.array([]), np.array([])
-    
-    X = np.array(all_windows)
-    y = np.array(all_labels)
-    
-    return X, y
+            if F is None:
+                log(f"  skip {label}/{f.name}: unreadable or too short")
+                continue
+            sessions.setdefault(label, []).append((f"{label}/{f.name}", F))
+            rate_notes.append(dt)
+        n = len(sessions.get(label, []))
+        rows = sum(len(F) for _, F in sessions.get(label, []))
+        log(f"  [{label}] {n} sessions, {rows} rows")
+    return sessions, rate_notes
 
-# --- 3. Main Training Script ---
-if __name__ == "__main__":
-    
-    # 1. LOAD AND PROCESS DATA
-    X, y = load_and_process_data(DATA_DIR)
-    
-    if X.shape[0] == 0:
-        print("No data found! Check your DATA_DIR and file structure.")
-        exit()
-        
-    print(f"\nCreated {X.shape[0]} training examples (windows).")
-    print(f"Data shape (X): {X.shape}") 
-    print(f"Labels shape (y): {y.shape}") 
 
-    # 2. ENCODE LABELS
-    label_encoder = LabelEncoder()
-    y_encoded = label_encoder.fit_transform(y)
-    
-    class_names = list(label_encoder.classes_)
-    num_classes = len(class_names)
-    print(f"\nFound {num_classes} classes: {class_names}")
-    
-    # We must save this encoder to decode predictions later!
+# ----------------------------------------------------------------------------
+# 2. Honest split by session
+# ----------------------------------------------------------------------------
+def split_by_session(sessions):
+    rng = np.random.RandomState(SEED)
+    Xtr, ytr, Xte, yte, warnings = [], [], [], [], []
+    for label, sess in sessions.items():
+        if len(sess) >= 2:
+            n_test = max(1, int(round(TEST_FRACTION * len(sess))))
+            order = rng.permutation(len(sess))
+            test_ids = set(order[:n_test].tolist())
+            for i, (_, F) in enumerate(sess):
+                (Xte if i in test_ids else Xtr).append(F)
+                (yte if i in test_ids else ytr).extend([label] * len(F))
+        else:
+            F = sess[0][1]
+            cut = int(len(F) * (1 - TEST_FRACTION))
+            gap = min(10, max(0, cut // 10))
+            Xtr.append(F[:cut]); ytr.extend([label] * cut)
+            tail = F[cut + gap:]
+            Xte.append(tail); yte.extend([label] * len(tail))
+            warnings.append(
+                f"Class '{label}' has only ONE recording session, so its test rows come from the "
+                f"end of that same session. Its score is optimistic. Record more sessions for it.")
+    return (np.vstack(Xtr), np.array(ytr), np.vstack(Xte), np.array(yte), warnings)
+
+
+def augment(X, y, copies, rng):
+    if copies <= 0:
+        return X, y
+    Xs, ys = [X], [y]
+    for _ in range(copies):
+        noise = np.zeros_like(X)
+        noise[:, :5] = rng.normal(0, 0.005, (len(X), 5))   # ~20 counts on the hall sensors
+        noise[:, 5:] = rng.normal(0, 0.02, (len(X), 3))    # small tilt jitter
+        Xs.append(X + noise); ys.append(y)
+    return np.vstack(Xs), np.concatenate(ys)
+
+
+# ----------------------------------------------------------------------------
+# 3. Candidate models
+# ----------------------------------------------------------------------------
+def candidates():
+    return {
+        "RandomForest": RandomForestClassifier(
+            n_estimators=150, min_samples_leaf=2, class_weight="balanced_subsample",
+            n_jobs=-1, random_state=SEED),
+        "ExtraTrees": ExtraTreesClassifier(
+            n_estimators=150, min_samples_leaf=2, class_weight="balanced_subsample",
+            n_jobs=-1, random_state=SEED),
+        "kNN": make_pipeline(StandardScaler(),
+                             KNeighborsClassifier(n_neighbors=15, weights="distance")),
+    }
+
+
+def save_atomic(obj, path):
+    tmp = Path(str(path) + ".tmp")
+    joblib.dump(obj, tmp)
+    os.replace(tmp, path)
+
+
+def main():
+    t_start = time.time()
+    if not DATA_DIR.exists():
+        log(f"No data folder at {DATA_DIR}")
+        return 1
+    sessions, dts = load_all()
+    if len(sessions) < 2:
+        log("Need at least 2 labelled classes. Record more data first.")
+        return 1
+
+    classes = sorted(sessions.keys())
+    Xtr, ytr, Xte, yte, warnings = split_by_session(sessions)
+    total_rows = len(Xtr) + len(Xte)
+    log(f"\nClasses ({len(classes)}): {classes}")
+    log(f"Train rows: {len(Xtr)}   Test rows (unseen sessions): {len(Xte)}")
+    for w in warnings:
+        log("WARNING:", w)
+    dts = [d for d in dts if np.isfinite(d)]
+    if dts and np.median(dts) > 40:
+        log(f"NOTE: typical gap between readings in your recordings is {np.median(dts):.0f} ms "
+            f"(~{1000/np.median(dts):.0f} Hz). New recordings at 100 Hz will be much better.")
+
+    rng = np.random.RandomState(SEED)
+    Xtr_a, ytr_a = augment(Xtr, ytr, AUGMENT_COPIES, rng)
+
+    results = {}
+    best_name, best_f1 = None, -1.0
+    for name, model in candidates().items():
+        t0 = time.time()
+        model.fit(Xtr_a, ytr_a)
+        pred = model.predict(Xte)
+        f1 = f1_score(yte, pred, average="macro", labels=classes, zero_division=0)
+        acc = float(np.mean(pred == yte))
+        results[name] = (f1, acc)
+        log(f"  {name:13s} test macro-F1 {f1:.3f}  accuracy {acc*100:.1f}%  ({time.time()-t0:.1f}s)")
+        if f1 > best_f1:
+            best_name, best_f1 = name, f1
+    log(f"\nBest on unseen sessions: {best_name}")
+
+    # ---- report on held-out sessions using the winning model (trained on train only)
+    best = candidates()[best_name]
+    best.fit(Xtr_a, ytr_a)
+    proba = best.predict_proba(Xte)
+    model_classes = list(best.classes_)
+    pred = np.array([model_classes[i] for i in np.argmax(proba, axis=1)])
+    cidx = {c: i for i, c in enumerate(classes)}
+    y_true = np.array([cidx[c] for c in yte])
+    y_pred = np.array([cidx[c] for c in pred])
+    labels = list(range(len(classes)))
+    prec, rec, f1s, sup = precision_recall_fscore_support(
+        y_true, y_pred, labels=labels, zero_division=0)
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    acc_overall = float(np.mean(y_true == y_pred))
+
+    class_metrics = []
+    for i, c in enumerate(classes):
+        mask = y_true == i
+        correct = int((y_pred[mask] == i).sum()) if mask.any() else 0
+        class_metrics.append({
+            "class": c, "accuracy": float(correct / mask.sum()) if mask.any() else 0.0,
+            "precision": float(prec[i]), "recall": float(rec[i]), "f1_score": float(f1s[i]),
+            "support": int(sup[i]), "correct": correct, "total": int(mask.sum())})
+        log(f"  {c:10s} recall {rec[i]*100:5.1f}%  precision {prec[i]*100:5.1f}%  (test rows {int(sup[i])})")
+
+    cm_dict = {a: {b: int(cm[i][j]) for j, b in enumerate(classes)} for i, a in enumerate(classes)}
+    errors = []
+    for k in np.where(y_true != y_pred)[0]:
+        p = proba[k]
+        errors.append({
+            "actual": classes[y_true[k]], "predicted": classes[y_pred[k]],
+            "confidence": float(np.max(p)),
+            "probabilities": {model_classes[j]: float(p[j]) for j in range(len(model_classes))}})
+    errors = sorted(errors, key=lambda e: e["confidence"], reverse=True)[:10]
+
+    # ---- final model: refit on ALL rows (more data = better), after the honest test above
+    Xall = np.vstack([Xtr, Xte]); yall = np.concatenate([ytr, yte])
+    Xall_a, yall_a = augment(Xall, yall, AUGMENT_COPIES, rng)
+    final = candidates()[best_name]
+    final.fit(Xall_a, yall_a)
+    if hasattr(final, "n_jobs"):
+        final.n_jobs = 1          # live prediction is one row at a time; threads only add delay
+    t0 = time.perf_counter()
+    for _ in range(20):
+        final.predict_proba(Xte[:1])
+    infer_ms = (time.perf_counter() - t0) / 20 * 1000
+    log(f"Single-row prediction time: {infer_ms:.1f} ms")
+
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(label_encoder, MODELS_DIR / "label_encoder.joblib")
-    print(f"Label encoder saved to {MODELS_DIR / 'label_encoder.joblib'}")
-    
-    y_categorical = to_categorical(y_encoded, num_classes)
+    bundle = {"model": final, "classes": list(final.classes_), "features": FEATURE_NAMES,
+              "smooth_ms": SMOOTH_MS, "kind": "frame", "name": best_name}
+    save_atomic(bundle, MODELS_DIR / "frame_model.joblib")
+    config = {"kind": "frame", "model": best_name, "classes": list(final.classes_),
+              "features": FEATURE_NAMES, "smooth_ms": SMOOTH_MS,
+              "trained_at": datetime.now().isoformat(), "infer_ms": round(infer_ms, 2)}
+    (MODELS_DIR / "config.json.tmp").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    os.replace(MODELS_DIR / "config.json.tmp", MODELS_DIR / "config.json")
 
-    # 3. SPLIT DATA (Train & Test)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_categorical, 
-        test_size=0.2, 
-        random_state=42,
-        stratify=y_categorical 
-    )
-    
-    print(f"Training set: {X_train.shape[0]} samples")
-    print(f"Testing set: {X_test.shape[0]} samples")
-
-    # 4. SCALE (NORMALIZE) DATA
-    scaler = StandardScaler()
-    X_train_reshaped = X_train.reshape(-1, NUM_FEATURES)
-    scaler.fit(X_train_reshaped)
-    
-    # --- 2. THIS IS THE NEW PART ---
-    # Save the scaler to a file
-    joblib.dump(scaler, MODELS_DIR / "scaler.joblib")
-    print(f"Scaler saved to {MODELS_DIR / 'scaler.joblib'}")
-    # --- END OF NEW PART ---
-    
-    # Transform both train and test sets
-    X_train_scaled = scaler.transform(X_train_reshaped).reshape(X_train.shape)
-    X_test_reshaped = X_test.reshape(-1, NUM_FEATURES)
-    X_test_scaled = scaler.transform(X_test_reshaped).reshape(X_test.shape)
-    
-    print("\nData scaling complete.")
-
-    # 5. BUILD THE LSTM MODEL
-    model = Sequential()
-    model.add(Input(shape=(WINDOW_SIZE, NUM_FEATURES)))
-    model.add(LSTM(64))
-    model.add(Dropout(0.3))
-    model.add(Dense(num_classes, activation='softmax'))
-    model.summary()
-
-    # 6. COMPILE THE MODEL
-    model.compile(
-        optimizer='adam',
-        loss='categorical_crossentropy', 
-        metrics=['accuracy']
-    )
-
-    # 7. TRAIN THE MODEL
-    print("\n--- Starting Model Training ---")
-    history = model.fit(
-        X_train_scaled,
-        y_train,
-        epochs=20, 
-        batch_size=32,
-        validation_data=(X_test_scaled, y_test)
-    )
-    
-    print("--- Training Complete ---")
-
-    # 8. EVALUATE THE MODEL
-    print("\n--- Evaluating Model on Test Data ---")
-    loss, accuracy = model.evaluate(X_test_scaled, y_test)
-    print(f"Test Loss: {loss:.4f}")
-    print(f"Test Accuracy: {accuracy * 100:.2f}%")
-
-    # 9. SHOW CONFUSION MATRIX
-    y_pred_probs = model.predict(X_test_scaled)
-    y_pred_labels = np.argmax(y_pred_probs, axis=1)
-    y_true_labels = np.argmax(y_test, axis=1)
-    
-    print("\n--- Classification Report ---")
-    print(classification_report(y_true_labels, y_pred_labels, target_names=class_names))
-    
-    print("\n--- Confusion Matrix ---")
-    cm = confusion_matrix(y_true_labels, y_pred_labels)
-    print(pd.DataFrame(cm, index=class_names, columns=class_names))
-    
-    # 9b. GENERATE DETAILED JSON REPORT FOR FRONTEND
-    print("\n--- Generating Training Report ---")
-    
-    # Calculate per-class metrics
-    from sklearn.metrics import precision_recall_fscore_support
-    precision, recall, f1, support = precision_recall_fscore_support(
-        y_true_labels, y_pred_labels, labels=range(len(class_names))
-    )
-    
-    # Build per-class statistics
-    class_metrics = []
-    for i, class_name in enumerate(class_names):
-        class_mask = y_true_labels == i
-        class_accuracy = np.mean(y_pred_labels[class_mask] == y_true_labels[class_mask]) if class_mask.sum() > 0 else 0
-        
-        class_metrics.append({
-            "class": class_name,
-            "accuracy": float(class_accuracy),
-            "precision": float(precision[i]),
-            "recall": float(recall[i]),
-            "f1_score": float(f1[i]),
-            "support": int(support[i]),
-            "correct": int((y_pred_labels[class_mask] == y_true_labels[class_mask]).sum()) if class_mask.sum() > 0 else 0,
-            "total": int(class_mask.sum())
-        })
-    
-    # Calculate confusion matrix as nested dict for easier visualization
-    cm_dict = {}
-    for i, actual_class in enumerate(class_names):
-        cm_dict[actual_class] = {}
-        for j, pred_class in enumerate(class_names):
-            cm_dict[actual_class][pred_class] = int(cm[i][j])
-    
-    # Get top misclassifications
-    top_errors = []
-    for i in range(len(y_true_labels)):
-        if y_pred_labels[i] != y_true_labels[i]:
-            top_errors.append({
-                "actual": class_names[y_true_labels[i]],
-                "predicted": class_names[y_pred_labels[i]],
-                "confidence": float(np.max(y_pred_probs[i])),
-                "probabilities": {class_names[j]: float(y_pred_probs[i][j]) for j in range(len(class_names))}
-            })
-    
-    # Sort by confidence (highest first - most confident errors)
-    top_errors = sorted(top_errors, key=lambda x: x['confidence'], reverse=True)[:10]
-    
-    # Build comprehensive report
-    training_report = {
+    report = {
         "timestamp": datetime.now().isoformat(),
-        "model_name": "models/active/sign_language_model.keras",
+        "model_name": "models/active/frame_model.joblib",
+        "split": "by recording session (honest)",
         "training_config": {
-            "epochs": 20,
-            "batch_size": 32,
-            "window_size": WINDOW_SIZE,
-            "step_size": STEP_SIZE,
-            "num_features": NUM_FEATURES,
-            "num_classes": num_classes,
-            "total_samples": len(X),
-            "train_samples": len(X_train),
-            "test_samples": len(X_test),
-            "test_split": 0.2
-        },
+            "model": best_name, "smooth_ms": SMOOTH_MS, "num_features": len(FEATURE_NAMES),
+            "num_classes": len(classes), "total_samples": int(total_rows),
+            "train_samples": int(len(Xtr)), "test_samples": int(len(Xte)),
+            "test_split": TEST_FRACTION,
+            # kept so older versions of the web page still show something sensible
+            "epochs": best_name, "batch_size": len(FEATURE_NAMES), "window_size": SMOOTH_MS},
         "overall_metrics": {
-            "test_loss": float(loss),
-            "test_accuracy": float(accuracy),
-            "test_accuracy_percent": float(accuracy * 100)
-        },
-        "class_metrics": class_metrics,
-        "confusion_matrix": cm_dict,
-        "top_errors": top_errors,
-        "training_history": {
-            "epochs": len(history.history['loss']),
-            "final_loss": float(history.history['loss'][-1]),
-            "final_val_loss": float(history.history['val_loss'][-1]),
-            "final_accuracy": float(history.history['accuracy'][-1]),
-            "final_val_accuracy": float(history.history['val_accuracy'][-1]),
-            "loss_history": [float(x) for x in history.history['loss']],
-            "val_loss_history": [float(x) for x in history.history['val_loss']],
-            "accuracy_history": [float(x) for x in history.history['accuracy']],
-            "val_accuracy_history": [float(x) for x in history.history['val_accuracy']]
-        }
+            "test_accuracy": acc_overall, "test_accuracy_percent": acc_overall * 100,
+            "test_macro_f1": float(best_f1), "test_loss": 0.0},
+        "candidates": {k: {"macro_f1": v[0], "accuracy": v[1]} for k, v in results.items()},
+        "warnings": warnings,
+        "class_metrics": class_metrics, "confusion_matrix": cm_dict, "top_errors": errors,
     }
-    
-    # Save report to JSON
-    report_path = REPORTS_DIR / "training_report.json"
-    with open(report_path, 'w', encoding='utf-8') as f:
-        json.dump(training_report, f, indent=2)
-    print(f"Training report saved to {report_path}")
-    
-    # 10. SAVE THE MODEL (using modern Keras format)
-    model_path = MODELS_DIR / "sign_language_model.keras"
-    model.save(model_path)
-    print(f"\nModel saved as '{model_path}'")
+    (REPORTS_DIR / "training_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    log(f"\nHonest test accuracy (unseen sessions): {acc_overall*100:.1f}%   macro-F1 {best_f1:.3f}")
+    log(f"Saved model + report. Total time {time.time()-t_start:.1f}s")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

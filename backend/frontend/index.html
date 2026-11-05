@@ -6,7 +6,7 @@
     <title>SignSpeak | Smart Glove Interface</title>
     
     <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/vendor/tailwind.js"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -22,17 +22,17 @@
     </script>
     
     <!-- React & ReactDOM -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="/vendor/react.production.min.js"></script>
+    <script src="/vendor/react-dom.production.min.js"></script>
     
     <!-- Babel (Compiles JSX in the browser) -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="/vendor/babel.min.js"></script>
     
     <!-- Framer Motion -->
-    <script src="https://unpkg.com/framer-motion@10.16.4/dist/framer-motion.js"></script>
+    <script src="/vendor/framer-motion.js"></script>
     
     <!-- Lucide Icons (Core Library) -->
-    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="/vendor/lucide.js"></script>
 
     <style>
         :root {
@@ -183,6 +183,7 @@
                 prediction: "..."
             });
             const [dataHistory, setDataHistory] = useState([]);
+            const [letters, setLetters] = useState([]);
             
             // Recording State
             const [isRecording, setIsRecording] = useState(false);
@@ -265,7 +266,7 @@
                         ws.current.onmessage = (event) => {
                             const msg = JSON.parse(event.data);
                             if (msg.type === "live_update") {
-                                setSensorData(prev => ({ ...prev, ...msg.data.raw_data, prediction: msg.data.prediction }));
+                                setSensorData(prev => ({ ...prev, ...msg.data.raw_data, prediction: msg.data.prediction, confidence: msg.data.confidence, motion: msg.data.motion, decisionMs: msg.data.decision_ms, telemetry: msg.data.telemetry }));
                                 setDataHistory(prev => {
                                     const newData = [...prev, msg.data.raw_data];
                                     if (newData.length > 50) newData.shift();
@@ -275,6 +276,8 @@
                                 if (msg.data.recording_count !== undefined) {
                                     setRecordCount(msg.data.recording_count);
                                 }
+                            } else if (msg.type === "letter") {
+                                setLetters(prev => [...prev.slice(-79), msg.data.label]);
                             } else if (msg.type === "train_log") {
                                 setTrainLog(prev => {
                                     const newLog = [...prev, msg.data];
@@ -468,7 +471,13 @@
                                         <div className={`absolute inset-0 opacity-20 ${theme === 'dark' ? 'bg-[url("data:image/svg+xml...")]' : ''}`}></div>
                                         <h2 className={`${theme === 'dark' ? 'text-green-500' : 'text-blue-600'} font-mono text-sm mb-2 uppercase tracking-widest`}>Live Prediction</h2>
                                         <div className={`text-7xl md:text-9xl font-black tracking-tighter mb-2 relative z-10 ${theme === 'dark' ? 'text-white' : 'text-blue-950'}`}>{sensorData.prediction}</div>
-                                        <div className={`text-sm ${theme === 'dark' ? 'text-gray-500' : 'text-blue-400'}`}>Confidence: 98.4%</div>
+                                        <div className={`text-sm ${theme === 'dark' ? 'text-gray-500' : 'text-blue-400'}`}>{sensorData.confidence != null ? `Confidence: ${Math.round(sensorData.confidence * 100)}%` : 'Confidence: --'}{sensorData.motion ? ` · hand ${sensorData.motion.state}` : ''}{sensorData.decisionMs != null ? ` · decided in ${sensorData.decisionMs} ms` : ''}{sensorData.telemetry ? ` · ${sensorData.telemetry.rate_hz} Hz · gaps ${sensorData.telemetry.seq_gaps}` : ''}</div>
+                                        <div className="mt-4 flex items-center justify-center gap-2 flex-wrap relative z-10">
+                                            <div className="font-mono text-2xl tracking-widest min-h-[2rem] mr-2">{letters.join('')}</div>
+                                            <button onClick={() => setLetters(p => p.slice(0, -1))} className="px-3 py-1 rounded border border-gray-500/50 text-xs hover:opacity-70">Backspace</button>
+                                            <button onClick={() => setLetters([])} className="px-3 py-1 rounded border border-gray-500/50 text-xs hover:opacity-70">Clear</button>
+                                            <button onClick={() => { if (window.speechSynthesis && letters.length) window.speechSynthesis.speak(new SpeechSynthesisUtterance(letters.join(''))); }} className="px-3 py-1 rounded border border-gray-500/50 text-xs hover:opacity-70">Speak</button>
+                                        </div>
                                     </div>
                                     <div className="grid md:grid-cols-3 gap-6">
                                         <div className={`md:col-span-2 border rounded-xl p-5 backdrop-blur-sm transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white/80 border-blue-200 shadow-sm'}`}>
@@ -665,12 +674,12 @@
                                                         <div className={`border rounded-xl p-6 transition-colors duration-300 ${theme === 'dark' ? 'bg-gray-900/50 border-gray-800' : 'bg-white border-gray-200 shadow-sm'}`}>
                                                             <h4 className="font-bold text-lg flex items-center gap-2 mb-4"><Icon name="settings" className="w-5 h-5 text-cyan-500" /> Training Config</h4>
                                                             <div className="space-y-2 text-sm">
-                                                                <div className="flex justify-between opacity-70"><span>Epochs</span><span className="font-mono font-bold">{trainingReport.training_config.epochs}</span></div>
-                                                                <div className="flex justify-between opacity-70"><span>Batch Size</span><span className="font-mono font-bold">{trainingReport.training_config.batch_size}</span></div>
+                                                                <div className="flex justify-between opacity-70"><span>Model</span><span className="font-mono font-bold">{trainingReport.training_config.model}</span></div>
+                                                                <div className="flex justify-between opacity-70"><span>Features</span><span className="font-mono font-bold">{trainingReport.training_config.num_features}</span></div>
                                                                 <div className="flex justify-between opacity-70"><span>Training Samples</span><span className="font-mono font-bold">{trainingReport.training_config.train_samples}</span></div>
                                                                 <div className="flex justify-between opacity-70"><span>Test Samples</span><span className="font-mono font-bold">{trainingReport.training_config.test_samples}</span></div>
                                                                 <div className="flex justify-between opacity-70"><span>Classes</span><span className="font-mono font-bold">{trainingReport.training_config.num_classes}</span></div>
-                                                                <div className="flex justify-between opacity-70"><span>Window Size</span><span className="font-mono font-bold">{trainingReport.training_config.window_size}</span></div>
+                                                                <div className="flex justify-between opacity-70"><span>Smoothing (ms)</span><span className="font-mono font-bold">{trainingReport.training_config.smooth_ms}</span></div>
                                                             </div>
                                                         </div>
                                                         ) : null}
